@@ -1,13 +1,38 @@
-import math, time
-import machine
+import time
+
 
 # load the MicroPython pulse-width-modulation module for driving hardware
-from machine import PWM, Pin
-#from machine import Pin
+from machine import PWM, Pin, ADC, WDT
+
 
 # for IR receiver
 from ir_rx.nec import NEC_8 # Use the NEC 8-bit class
 from ir_rx.print_error import print_error # for debugging
+
+# scheduler
+from micropython import schedule
+
+
+#========================================================================================================#
+# SETUP WATCHDOG
+#========================================================================================================#
+
+wdt = WDT(timeout=2000) # 2 seconds
+
+# works with IR because we constantly get IR signals, so feed the dog when we get an ir signal
+
+# implementing this with rf will be different, how would we do this since we dont constantly send
+# rf signals?
+
+#========================================================================================================#
+# EXTERNAL ANALOG VARIABLE KNOB
+#========================================================================================================#
+# FOR TESTING I AM USING THIS TO CHANGE THE "LOWER BOUNDS" OF THE MOTOR DRIVING PWM VALUE
+# WE NEED TO KNOW THIS IF WE WANT TO HAVE VARIABLE STEERING THAT SWEEPS FROM LOWER BOUND TO FULL SPEED
+
+ADC_0_PIN = 26
+external_knob = ADC(ADC_0_PIN)
+
 
 #========================================================================================================#
 # LED SETUP AND FUNCTIONS
@@ -91,28 +116,28 @@ def RF_ON_callback(pin):
      # request an interrupt while one is active
     disable_rf_irq()
     if D3_RF_INPUT.value() == 1:                # [A]     BUTTON:     DRIVE FORWARD
-        full_forward()
+        full_forward(0x33)
         while(1):
             if D3_RF_INPUT.value() == 0:
-                motors_stop()
+                motors_stop(0x00)
                 break
     elif D2_RF_INPUT.value() == 1:              # [B]     BUTTON:     SPIN RIGHT
-        spin_right()
+        spin_right(9)
         while(1):
             if D2_RF_INPUT.value() == 0:
-                motors_stop()
+                motors_stop(0x00)
                 break
     elif D1_RF_INPUT.value() == 1:              # [C]     BUTTON:     SPIN LEFT
-        spin_left()
+        spin_left(9)
         while(1):
             if D1_RF_INPUT.value() == 0:
-                motors_stop()
+                motors_stop(0x00)
                 break        
     elif D0_RF_INPUT.value() == 1:              # [D]     BUTTON:     DRIVE BACKWARD
-        full_back()
+        full_backward(0x88)
         while(1):
             if D0_RF_INPUT.value() == 0:
-                motors_stop()
+                motors_stop(0x00)
                 break
     enable_rf_irq()
 
@@ -134,163 +159,215 @@ ain2_en = PWM(13, freq = pwm_rate, duty_u16 = 0)
 bin1_ph = Pin(14, Pin.OUT)                                  
 bin2_en = PWM(15, freq = pwm_rate, duty_u16 = 0)
 
-#                                           XXXXX    65535 IS FULL SPEED (100% DUTY)
-pwm_full = min(max(int(2**16 * abs(1)), 0), 65535)   
 
-pwm_slow = min(max(int(2**16 * abs(1)), 0), 45000) # <---- toggle the slower drive setting
+FULL_PWR = 65535  #65535 IS FULL SPEED (100% DUTY)
+
+BACK_LEFT = 35000
+
+BACK_RIGHT = 35000
+
+low_pwr = 6553
+#low_pwr = external_knob.read_u16()
+
+### VIA TESTING FOUND ~6553 TO BE THE LOWER BOUND FOR PWM ON THE BULKY TEST SET UP
+### ACTUAL BOT THIS VALUE WILL BE DIFFERENT
+
+#                                           XXXXX    
+pwm_full = min(max(int(2**16 * abs(1)), 0), FULL_PWR)   
+
+pwm_back_left = min(max(int(2**16 * abs(1)), 0), BACK_LEFT)
+
+pwm_back_right = min(max(int(2**16 * abs(1)), 0), BACK_RIGHT)
+
+pwm_slow = min(max(int(2**16 * abs(1)), 0), low_pwr) # <---- toggle the slower drive setting
+
+pwm_adjust = min(max(int(2**16 * abs(1)), 0), low_pwr) # <---- toggle the slower drive setting
+
+
+#adjusting the external knob to find what the lower bound is according to the weight of bot
+def adjust_pwm_slow():
+    global low_pwr, pwm_slow
+    low_pwr = external_knob.read_u16()
+    print(f"knob val: {low_pwr}")
+    pwm_slow = min(max(int(2**16 * abs(1)), 0), low_pwr)   
+
+
+def turn_adjust(turning_code):
+    global low_pwr, pwm_adjust
+    PARTITIONS = 9 # since we use 0-9 in the hex number for turning instructions
+    interval_size = (FULL_PWR - low_pwr) / 9
+    turning_pwm = int(FULL_PWR - (turning_code * interval_size))
+    pwm_adjust = min(max(int(2**16 * abs(1)), 0), turning_pwm) # <---- toggle the slower drive setting
+    print(f"pwm adjust: {turning_pwm}")
+
+def spin_adjust(turning_code):
+    global low_pwr, pwm_adjust
+    PARTITIONS = 9 # since we use 0-9 in the hex number for turning instructions
+    interval_size = (FULL_PWR - low_pwr) / 9
+    turning_pwm = int(low_pwr + (turning_code * interval_size))
+    pwm_adjust = min(max(int(2**16 * abs(1)), 0), turning_pwm) # <---- toggle the slower drive setting
+    print(f"pwm adjust: {turning_pwm}")
+
 
 # SET INITIAL DIRECTION OF MOTORS TO BE FORWARD       # .low() is FORWARD     # .high() is BACKWARD
-ain1_ph.low()
-bin1_ph.low()
+ain1_ph.low()           # RIGHT WHEEL
+bin1_ph.low()           # 
 
-def drive_forward():        
+
+def full_forward(data):
+    #print(f"    FULL FORWARD {data}")
+    #adjust_pwm_slow()       #update the amount of slow per the external knob's adc value
     ain2_en.duty_u16(0)
     bin2_en.duty_u16(0)
-    ain1_ph.low()           # SET MOTOR DIRECTION FORWARD
-    bin1_ph.low()
-    ain2_en.duty_u16(pwm_slow)   # DRIVES THE MOTORS
-    bin2_en.duty_u16(pwm_slow)
-    print("     DRIVE FORWARD")
-
-def full_forward():        
-    ain2_en.duty_u16(0)
-    bin2_en.duty_u16(0)
-    ain1_ph.low()           # SET MOTOR DIRECTION FORWARD
-    bin1_ph.low()
-    ain2_en.duty_u16(pwm_full)   # DRIVES THE MOTORS
-    bin2_en.duty_u16(pwm_full)
-    print("     DRIVE FORWARD")
-
-def full_left():        
-    ain2_en.duty_u16(0)
-    bin2_en.duty_u16(0)
-    ain1_ph.low()           # SET MOTOR DIRECTION FORWARD
-    bin1_ph.low()
-    ain2_en.duty_u16(pwm_full)   # DRIVES THE MOTORS
-    bin2_en.duty_u16(pwm_slow)
-    print("     DRIVE FORWARD")
-
-def full_right():        
-    ain2_en.duty_u16(0)
-    bin2_en.duty_u16(0)
-    ain1_ph.low()           # SET MOTOR DIRECTION FORWARD
-    bin1_ph.low()
-    ain2_en.duty_u16(pwm_slow)   # DRIVES THE MOTORS
-    bin2_en.duty_u16(pwm_full)
-    print("     DRIVE FORWARD")
-
-def drive_back():       
-    ain2_en.duty_u16(0)
-    bin2_en.duty_u16(0)
-    ain1_ph.high()          # SET MOTOR DIRECTION BACKWARD
-    bin1_ph.high()
-    ain2_en.duty_u16(pwm_slow)   # DRIVES THE MOTORS
-    bin2_en.duty_u16(pwm_slow)
-    print("     DRIVE BACKWARD")
-
-def full_back():       
-    ain2_en.duty_u16(0)
-    bin2_en.duty_u16(0)
-    ain1_ph.high()          # SET MOTOR DIRECTION BACKWARD
+    ain1_ph.high()           # SET MOTOR DIRECTION FORWARD
     bin1_ph.high()
     ain2_en.duty_u16(pwm_full)   # DRIVES THE MOTORS
     bin2_en.duty_u16(pwm_full)
-    print("     DRIVE BACKWARD")
+    wdt.feed()
+    
 
-def slow_left():            
+def forward_left(turning_code):
+    #print("    FWD/LEFT")
+    turn_adjust(turning_code)      
     ain2_en.duty_u16(0)
     bin2_en.duty_u16(0)
-    ain1_ph.high()          # LEFT WHEEL BACKWARD
+    ain1_ph.high()           # SET MOTOR DIRECTION FORWARD
+    bin1_ph.high()
+    ain2_en.duty_u16(pwm_full)   # DRIVES THE MOTORS
+    bin2_en.duty_u16(pwm_adjust)
+    wdt.feed()
+    
+
+def forward_right(turning_code):
+    #print("    FWD/RIGHT")
+    turn_adjust(turning_code)        
+    ain2_en.duty_u16(0)
+    bin2_en.duty_u16(0)
+    ain1_ph.high()           # SET MOTOR DIRECTION FORWARD
+    bin1_ph.high()
+    bin2_en.duty_u16(pwm_full)
+    ain2_en.duty_u16(pwm_adjust)   # DRIVES THE MOTORS
+    wdt.feed()
+    
+
+def full_backward(data):
+    #print(f"    FULL BACKWARD{data}")
+    ain2_en.duty_u16(0)
+    bin2_en.duty_u16(0)
+    ain1_ph.low()          # SET MOTOR DIRECTION BACKWARD
+    bin1_ph.low()
+    ain2_en.duty_u16(pwm_back_right)   # DRIVES THE MOTORS
+    bin2_en.duty_u16(pwm_back_left)
+    wdt.feed()
+    
+
+def backward_left(turning_code):
+    #print("    BACK/LEFT")
+    turn_adjust(turning_code)            
+    ain2_en.duty_u16(0)
+    bin2_en.duty_u16(0)
+    ain1_ph.low()          # LEFT WHEEL BACKWARD
     bin1_ph.low()           # RIGHT WHEEL FORWARD
-    #ain2_en.duty_u16(pwm_full)
-    bin2_en.duty_u16(pwm_full)
-    print("     SPIN LEFT")
+    ain2_en.duty_u16(pwm_full)   # DRIVES THE MOTORS
+    bin2_en.duty_u16(pwm_adjust)
+    wdt.feed()
 
-def spin_left():            
+
+def backward_right(turning_code):
+    #print("    BACK/RIGHT")
+    turn_adjust(turning_code)           
     ain2_en.duty_u16(0)
     bin2_en.duty_u16(0)
-    ain1_ph.high()          # LEFT WHEEL BACKWARD
+    ain1_ph.low()          # LEFT WHEEL BACKWARD
     bin1_ph.low()           # RIGHT WHEEL FORWARD
-    ain2_en.duty_u16(pwm_full)
     bin2_en.duty_u16(pwm_full)
-    print("     SPIN LEFT")
+    ain2_en.duty_u16(pwm_adjust)   # DRIVES THE MOTORS
+    
+    wdt.feed()
 
-def slow_right():
+
+def spin_left(turning_code): #turning code will determine how fast of a spin to do
+    #print("    SPIN LEFT")
+    spin_adjust(turning_code)            
     ain2_en.duty_u16(0)
     bin2_en.duty_u16(0)
-    ain1_ph.low()           # LEFT WHEEL FORWARD
-    bin1_ph.high()          # RIGHT WHEEL BACKWARD
-    ain2_en.duty_u16(pwm_full)
-    #bin2_en.duty_u16(pwm_full)
-    print("     SPIN RIGHT")
-
-def spin_right():
+    ain1_ph.high()         # RIGHT WHEEL FORWARD 
+    bin1_ph.low()           # LEFT WHEEL BACKWARD
+    bin2_en.duty_u16(pwm_adjust)
+    ain2_en.duty_u16(pwm_adjust)
+    wdt.feed()
+    
+    
+def spin_right(turning_code): #turning code will determine how fast of a spin to do
+    #print("    SPIN/RIGHT")
+    spin_adjust(turning_code)
     ain2_en.duty_u16(0)
     bin2_en.duty_u16(0)
-    ain1_ph.low()           # LEFT WHEEL FORWARD
-    bin1_ph.high()          # RIGHT WHEEL BACKWARD
-    ain2_en.duty_u16(pwm_full)
-    bin2_en.duty_u16(pwm_full)
-    print("     SPIN RIGHT")
+    ain1_ph.low()           # RIGHT WHEEL BACKWARD
+    bin1_ph.high()          # LEFT WHEEL FORWARD
+    ain2_en.duty_u16(pwm_adjust)
+    bin2_en.duty_u16(pwm_adjust)
+    wdt.feed()
+    
 
-def motors_stop():          
+def motors_stop(data):
+    #print(f"    motors stop{data}")         
     ain2_en.duty_u16(0)     # STOPS THE MOTORS
     bin2_en.duty_u16(0)
-    print("      MOTORS STOPPED")
+    wdt.feed()
+   
+motors_stop(0x00) # incase of restart or brownout, issue a motor_stop command on restart
 
 #========================================================================================================#
 # IR RECEIVER SETUP AND FUNCTIONS
 #========================================================================================================#
 
-# CONFIGURE THIS PIN TO POWER THE IR RECEIVER
-# WE CAN TOGGLE THIS PIN ON/OFF TO CONTROL THE IR RECEIVER
-# IR RECEIVER IS SELECTED AS DEFAULT ON STARTUP
-ir_power_pin = Pin(22, Pin.OUT)
-ir_power_pin.value(1)
-
 #data input from IR
 ir_pin = Pin(16, Pin.IN, Pin.PULL_UP)
 
+def turning_code(hex_num):
+    last_digit = hex_num % 16
+    print(f"        {last_digit}")
+    return last_digit
+
+
 # Callback function to execute when an IR code is received
 def ir_callback(data, addr, _):
+    
     #print(f"Received NEC command! Data: 0x{data:02X}, Addr: 0x{addr:02X}")     # USE FOR TROUBLESHOOTING
 
+    if (addr == 0x61):      # drive forward
+        #print(f"addr: 0x{addr:02X}, command: 0x{data:02X}")
 
-    if (data == 0x11 and addr == 0x61):      # drive forward
-        #print("drive forward")
-        drive_forward()
-    elif (data == 0x17 and addr == 0x61):    # FULL FORWARD
-        #print("FULL FORWARD")
-        full_forward()
-    elif (data == 0x1f and addr == 0x61):    # FULL LEFT
-        #print("FULL LEFT")
-        full_left()
-    elif (data == 0x2b and addr == 0x61):    # FULL RIGHT
-        #print("FULL RIGHT")
-        full_right()
-    elif (data == 0x35 and addr == 0x61):    # drive back
-        #print("drive back")
-        drive_back()
-    elif (data == 0x3b and addr == 0x61):    # FULL BACK
-        #print("FULL BACK")
-        full_back()
-    elif (data == 0x59 and addr == 0x61):    # slow left
-        #print("slow left")
-        slow_left()
-    elif (data == 0x6b and addr == 0x61):    # SPIN LEFT
-        #print("SPIN LEFT")
-        spin_left()
-    elif (data == 0x71 and addr == 0x61):    # slow right
-        #print("slow right")
-        slow_right()
-    elif (data == 0xa7 and addr == 0x61):    # SPIN RIGHT
-        #print("SPIN RIGHT")
-        spin_right()
-    elif (data == 0xbf and addr == 0x61):    # MOTORS STOP
-        #print("MOTORS STOP")
-        motors_stop()
-
-    
+        if (data == 0x00):
+            #motors_stop()
+            schedule(motors_stop, data)
+        elif(data == 0x33):
+            #full_forward()
+            schedule(full_forward, data)
+        elif(data == 0x88):
+            #full_backward()
+            schedule(full_backward, data)
+        elif(0x3f < data < 0x50):
+            #forward_left(turning_code(data))
+             schedule(forward_left, turning_code(data))
+        elif(0x4f < data < 0x60):
+            #forward_right(turning_code(data))
+             schedule(forward_right, turning_code(data))
+        elif(0x5f < data < 0x70):
+            #backward_left(turning_code(data))
+             schedule(backward_left, turning_code(data))
+        elif(0x6f < data < 0x80):
+            #backward_right(turning_code(data))
+             schedule(backward_right, turning_code(data))
+        elif(0x0f < data < 0x20):
+            #spin_left(turning_code(data))
+             schedule(spin_left, turning_code(data))
+        elif(0x1f < data < 0x30):
+            #spin_right(turning_code(data))
+             schedule(spin_right, turning_code(data))
+       
+       
 
 ir_receiver = NEC_8(ir_pin, callback=ir_callback)
       
@@ -315,6 +392,11 @@ push_button.irq(trigger=Pin.IRQ_FALLING, handler=push_button_callback)
 # so disable the RF interrupt handlers
 disable_rf_irq()
 
+def turn_off_ir():
+    ir_receiver.close()
+    time.sleep(0.5)
+
+
 global ir_mode 
 ir_mode = True   # False means comms are set to RF Receiver instead
 
@@ -323,22 +405,30 @@ ir_mode = True   # False means comms are set to RF Receiver instead
 ir_receiver.error_function(print_error)        # USE FOR TROUBLESHOOTING IF NEEDED
 
 def switch_receiver():
-    global ir_mode
+    global ir_mode, ir_receiver
     print("Switching Receiver Mode!")
-    motors_stop()
+    motors_stop(0x00)
     if (ir_mode == True):
         print("~RF RECEIVER ACTIVE~")
         ir_mode = False
-        ir_power_pin.value(0)       # DISABLE POWER PIN TO IR RECEIVER TO SHUT IT OFF
+        turn_off_ir()                                                              
         enable_rf_irq()             # TURN ON THE RF INTERRUPTS
         flash_board_led(4)          # Flash onboard LED to signal execution
     elif (ir_mode == False):
         print("~IR RECEIVER ACTIVE~")
         ir_mode = True
-        ir_power_pin.value(1)       # ENABLE POWER PIN TO IR RECEIVER TO TURN IT ON
+        ir_receiver = NEC_8(ir_pin, callback=ir_callback)
         disable_rf_irq()            # TURN OFF THE RF INTERRUPTS
         flash_board_led(4)          # Flash onboard LED to signal execution
-        
+   
+
+
+   
+
+  
+
+
+
 #========================================================================================================#
 # MAIN SETUP AND FUNCTIONS
 #========================================================================================================#
@@ -351,7 +441,7 @@ flash_4leds(4)
 def main():
 
     while True:
-        
+
         pass
 
 if __name__ == "__main__":
