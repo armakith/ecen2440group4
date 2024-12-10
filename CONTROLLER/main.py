@@ -161,6 +161,8 @@ def encode_cmd(direction, hex_code):
   print(f"    encoded: {hex(command_word)}")
   return command_word
 
+def power_push():
+  transmitter.transmit(device_addr, 0x97)
 
 def forward_drive(current_x):
   if abs(j_ctr_x - current_x) < j_thresh:
@@ -279,6 +281,8 @@ def main():
       elif not buttons & (1 << BUTTON_B):         # REVERSE
         print(f"steering pos: {current_x}")
         backward_drive(current_x)
+      elif not buttons & (1 << BUTTON_Y):         # POWER PUSH
+        power_push()
       else:                                       # always send stop commands when not in use
         print("stop driving()")
         stop_driving()
