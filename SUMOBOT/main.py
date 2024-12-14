@@ -480,7 +480,7 @@ def main():
     while True:
 
         if wdt_loop == True: #enabled when RF is chosen as comms
-            pass
+            #pass
             wdt.feed()
             
         pass
